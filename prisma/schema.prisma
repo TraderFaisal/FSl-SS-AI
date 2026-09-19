@@ -1,0 +1,344 @@
+// Prisma schema for FSL TRADER — AI MARKET VISION PRO
+// Database: PostgreSQL with relations, indexes, and full auditing
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  USER
+}
+
+enum LicenseStatus {
+  ACTIVE
+  EXPIRED
+  SUSPENDED
+  REVOKED
+  UNUSED
+}
+
+enum PlanTier {
+  FREE
+  BASIC
+  PRO
+  VIP
+  ENTERPRISE
+}
+
+enum SignalDirection {
+  UP
+  DOWN
+  NO_TRADE
+}
+
+enum MarketStructureType {
+  UPTREND
+  DOWNTREND
+  RANGE
+  CHOPPY
+  TRANSITION
+}
+
+model User {
+  id               String            @id @default(uuid())
+  email            String            @unique
+  passwordHash     String
+  name             String
+  role             Role              @default(USER)
+  status           String            @default("ACTIVE") // ACTIVE, SUSPENDED, PENDING
+  plan             PlanTier          @default(FREE)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  lastLoginAt      DateTime?
+
+  // Relations
+  licenses         License[]
+  devices          Device[]
+  sessions         Session[]
+  signals          Signal[]
+  watchlist        Watchlist[]
+  auditLogs        AuditLog[]
+  settings         UserSetting?
+
+  @@index([email])
+  @@index([role])
+}
+
+model Plan {
+  id             String     @id @default(uuid())
+  name           PlanTier   @unique
+  displayName    String
+  priceMonthly   Float
+  maxDevices     Int        @default(2)
+  dailyScanLimit Int        @default(20)
+  allowedFeatures Json      // list of enabled modules
+  description    String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+}
+
+model License {
+  id             String            @id @default(uuid())
+  key            String            @unique // FSL-XXXX-XXXX-XXXX-XXXX
+  plan           PlanTier          @default(PRO)
+  status         LicenseStatus     @default(UNUSED)
+  createdAt      DateTime          @default(now())
+  activatedAt    DateTime?
+  expiresAt      DateTime?
+  maxDevices     Int               @default(2)
+  scanLimit      Int               @default(100) // daily scan limit
+  lastUsedAt     DateTime?
+  notes          String?
+
+  userId         String?
+  user           User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  activations    LicenseActivation[]
+
+  @@index([key])
+  @@index([status])
+  @@index([userId])
+}
+
+model LicenseActivation {
+  id         String   @id @default(uuid())
+  licenseId  String
+  license    License  @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  deviceId   String
+  ipAddress  String?
+  userAgent  String?
+  activatedAt DateTime @default(now())
+  revokedAt  DateTime?
+
+  @@index([licenseId])
+  @@index([deviceId])
+}
+
+model Device {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceFingerprint String
+  browser     String?
+  os          String?
+  ipAddress   String?
+  lastActiveAt DateTime @default(now())
+  createdAt   DateTime  @default(now())
+
+  @@unique([userId, deviceFingerprint])
+  @@index([userId])
+}
+
+model Session {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token       String   @unique
+  ipAddress   String?
+  userAgent   String?
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([token])
+}
+
+model Signal {
+  id             String          @id @default(uuid())
+  userId         String?
+  user           User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  symbol         String          // e.g. NZD/JPY, EUR/USD, BTC/USDT
+  market         String          // FOREX, CRYPTO, INDICES
+  timeframe      String          // 1m, 3m, 5m, 15m, 1h
+  direction      SignalDirection
+  confluenceScore Float          // 0 to 100
+  setupQuality   String          // HIGH, MODERATE, LOW
+  summary        String
+  warnings       String[]
+  marketStructure MarketStructureType
+  imageUrl       String?
+  screenshotRef  String?
+  engineVersion  String          @default("v4.2-VISION-PRO")
+  resultStatus   String?         // PENDING, HIT_TP, HIT_SL, EXPIRED
+  createdAt      DateTime        @default(now())
+
+  // Multi-timeframe forecasts
+  next1MinDirection SignalDirection?
+  next1MinScore     Float?
+  next3MinDirection SignalDirection?
+  next3MinScore     Float?
+  next5MinDirection SignalDirection?
+  next5MinScore     Float?
+
+  factors        SignalFactor[]
+
+  @@index([symbol])
+  @@index([direction])
+  @@index([createdAt])
+  @@index([userId])
+}
+
+model SignalFactor {
+  id         String   @id @default(uuid())
+  signalId   String
+  signal     Signal   @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  category   String   // Trend, Momentum, Structure, Volume, Volatility, S/R, Candlestick, MTF
+  weight     Float
+  passed     Boolean
+  score      Float
+  details    String
+
+  @@index([signalId])
+}
+
+model Strategy {
+  id          String              @id @default(uuid())
+  name        String
+  description String?
+  enabled     Boolean             @default(true)
+  biasTarget  SignalDirection     @default(UP)
+  minConfluence Float             @default(70.0)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  conditions  StrategyCondition[]
+
+  @@index([enabled])
+}
+
+model StrategyCondition {
+  id          String   @id @default(uuid())
+  strategyId  String
+  strategy    Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+  logicOp     String   // IF, AND, OR
+  indicator   String   // EMA, RSI, MACD, ADX, PRICE, S_R
+  operator    String   // >, <, >=, <=, CROSS_ABOVE, CROSS_BELOW, EQUALS
+  compareValue String  // e.g., "EMA 21", "50", "SUPPORT"
+  param1      String?
+  param2      String?
+
+  @@index([strategyId])
+}
+
+model IndicatorConfig {
+  id              String   @id @default(uuid())
+  name            String   @unique
+  emaPeriods      Int[]    @default([9, 21, 50, 100, 200])
+  rsiPeriod       Int      @default(14)
+  macdFast        Int      @default(12)
+  macdSlow        Int      @default(26)
+  macdSignal      Int      @default(9)
+  adxPeriod       Int      @default(14)
+  adxThreshold    Float    @default(20.0)
+  atrPeriod       Int      @default(14)
+  bbPeriod        Int      @default(20)
+  bbStdDev        Float    @default(2.0)
+  noTradeCutoff   Float    @default(65.0)
+  srSensitivity   Float    @default(0.8)
+  structureDepth  Int      @default(5)
+  weights         Json     // Trend: 15, Momentum: 15, etc.
+  updatedAt       DateTime @updatedAt
+}
+
+model Market {
+  id          String   @id @default(uuid())
+  symbol      String   @unique
+  baseAsset   String
+  quoteAsset  String
+  marketType  String   // FOREX, CRYPTO, INDICES, COMMODITIES
+  lastPrice   Float
+  change24h   Float
+  high24h     Float
+  low24h      Float
+  volume24h   Float
+  isLive      Boolean  @default(true)
+  updatedAt   DateTime @updatedAt
+
+  candles     Candle[]
+
+  @@index([symbol])
+  @@index([marketType])
+}
+
+model Candle {
+  id         String   @id @default(uuid())
+  marketId   String
+  market     Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  timeframe  String   // 1m, 3m, 5m, 15m, 1h, 1d
+  timestamp  DateTime
+  open       Float
+  high       Float
+  low        Float
+  close      Float
+  volume     Float
+
+  @@unique([marketId, timeframe, timestamp])
+  @@index([marketId, timeframe, timestamp])
+}
+
+model Watchlist {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  symbol     String
+  addedAt    DateTime @default(now())
+
+  @@unique([userId, symbol])
+  @@index([userId])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String   // LOGIN, GENERATE_LICENSE, UPDATE_SETTINGS, SCAN_CHART, SUSPEND_USER
+  resource   String   // LICENSE, ENGINE, USER, SIGNAL
+  details    Json
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model SystemLog {
+  id         String   @id @default(uuid())
+  level      String   // INFO, WARN, ERROR, CRITICAL
+  subsystem  String   // VISION_ENGINE, CONFLUENCE_CORE, MARKET_FEED, AUTH, LICENSE
+  message    String
+  metadata   Json?
+  timestamp  DateTime @default(now())
+
+  @@index([level])
+  @@index([subsystem])
+  @@index([timestamp])
+}
+
+model ApiCredential {
+  id         String   @id @default(uuid())
+  provider   String   // BINANCE, TWELVEDATA, YAHOO_FINANCE, GEMINI
+  apiKeyMask String
+  isActive   Boolean  @default(true)
+  lastChecked DateTime @default(now())
+  status     String   @default("HEALTHY") // HEALTHY, DEGRADED, OFFLINE
+}
+
+model UserSetting {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  theme          String   @default("cyberpunk")
+  soundAlerts    Boolean  @default(true)
+  hapticFeedback Boolean  @default(false)
+  preferredTimeframe String @default("1m")
+  chartStyle     String   @default("candles")
+  autoScanInterval Int    @default(0) // 0 = manual
+  defaultMarket  String   @default("NZD/JPY")
+}

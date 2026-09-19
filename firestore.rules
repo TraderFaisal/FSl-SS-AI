@@ -1,0 +1,150 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default-Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Helper Primitives
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isSuperAdminEmail() {
+      return isSignedIn() &&
+        request.auth.token.email == 'faisal.sokal55@gmail.com';
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        isSuperAdminEmail() ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Entity Validation Helpers
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'email', 'role']) &&
+        data.keys().hasOnly(['id', 'email', 'name', 'role', 'status', 'plan', 'activeLicenseKey', 'createdAt']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.email is string && data.email.size() <= 128 &&
+        data.role in ['SUPER_ADMIN', 'ADMIN', 'USER'] &&
+        (!('name' in data) || (data.name is string && data.name.size() <= 100)) &&
+        (!('status' in data) || data.status in ['ACTIVE', 'SUSPENDED', 'PENDING']) &&
+        (!('plan' in data) || data.plan in ['FREE', 'BASIC', 'PRO', 'VIP', 'ENTERPRISE']) &&
+        (!('activeLicenseKey' in data) || (data.activeLicenseKey is string && data.activeLicenseKey.size() <= 64)) &&
+        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64));
+    }
+
+    function isValidLicense(data) {
+      return data.keys().hasAll(['key', 'plan', 'status']) &&
+        data.keys().hasOnly(['id', 'key', 'plan', 'status', 'maxDevices', 'scanLimit', 'activationsCount', 'expiresAt', 'createdAt']) &&
+        data.key is string && data.key.size() <= 64 &&
+        data.plan in ['FREE', 'BASIC', 'PRO', 'VIP', 'ENTERPRISE'] &&
+        data.status in ['ACTIVE', 'EXPIRED', 'SUSPENDED', 'REVOKED', 'UNUSED'] &&
+        (!('maxDevices' in data) || data.maxDevices is number) &&
+        (!('scanLimit' in data) || data.scanLimit is number) &&
+        (!('activationsCount' in data) || data.activationsCount is number) &&
+        (!('expiresAt' in data) || (data.expiresAt is string && data.expiresAt.size() <= 64)) &&
+        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64));
+    }
+
+    function isValidSignal(data) {
+      return data.keys().hasAll(['id', 'symbol', 'direction', 'confluenceScore']) &&
+        data.keys().hasOnly(['id', 'symbol', 'market', 'timeframe', 'direction', 'confluenceScore', 'setupQuality', 'setupTitle', 'currentPrice', 'explanation', 'timestamp']) &&
+        data.id is string && data.id.size() <= 64 &&
+        data.symbol is string && data.symbol.size() <= 32 &&
+        data.direction in ['UP', 'DOWN', 'NO_TRADE'] &&
+        data.confluenceScore is number &&
+        (!('market' in data) || (data.market is string && data.market.size() <= 32)) &&
+        (!('timeframe' in data) || (data.timeframe is string && data.timeframe.size() <= 16)) &&
+        (!('setupQuality' in data) || data.setupQuality in ['HIGH', 'MODERATE', 'LOW']) &&
+        (!('setupTitle' in data) || (data.setupTitle is string && data.setupTitle.size() <= 128)) &&
+        (!('currentPrice' in data) || data.currentPrice is number) &&
+        (!('explanation' in data) || (data.explanation is string && data.explanation.size() <= 2048)) &&
+        (!('timestamp' in data) || (data.timestamp is string && data.timestamp.size() <= 64));
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['id', 'action', 'timestamp']) &&
+        data.keys().hasOnly(['id', 'userId', 'userEmail', 'action', 'resource', 'timestamp', 'details']) &&
+        data.id is string && data.id.size() <= 64 &&
+        data.action is string && data.action.size() <= 64 &&
+        data.timestamp is string && data.timestamp.size() <= 64 &&
+        (!('userId' in data) || (data.userId is string && data.userId.size() <= 128)) &&
+        (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 128)) &&
+        (!('resource' in data) || (data.resource is string && data.resource.size() <= 64));
+    }
+
+    // 1. Users Collection (/users/{userId})
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId) && isOwner(userId) && isValidUser(request.resource.data) &&
+        // Self-registered user cannot assign themselves admin role
+        (request.resource.data.role == 'USER' || isAdmin());
+      allow update: if isValidId(userId) && isValidUser(request.resource.data) && (
+        isAdmin() ||
+        (
+          isOwner(userId) &&
+          // Non-admin cannot escalate their own role
+          request.resource.data.role == resource.data.role &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'activeLicenseKey'])
+        )
+      );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    // 2. Admins Registry (/admins/{userId})
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create, update, delete: if isValidId(userId) && isAdmin();
+    }
+
+    // 3. Licenses Collection (/licenses/{licenseId})
+    match /licenses/{licenseId} {
+      allow get: if isValidId(licenseId) && isSignedIn();
+      allow list: if isAdmin();
+      allow create: if isValidId(licenseId) && isAdmin() && isValidLicense(request.resource.data);
+      allow update: if isValidId(licenseId) && isValidLicense(request.resource.data) && (
+        isAdmin() ||
+        // User activation: only increment activationsCount
+        (
+          isSignedIn() &&
+          resource.data.status == 'ACTIVE' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activationsCount'])
+        )
+      );
+      allow delete: if isValidId(licenseId) && isAdmin();
+    }
+
+    // 4. Signals Collection (/signals/{signalId})
+    match /signals/{signalId} {
+      allow get: if isValidId(signalId) && isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isValidId(signalId) && (isAdmin() || isSignedIn()) && isValidSignal(request.resource.data);
+      allow update: if isValidId(signalId) && isAdmin() && isValidSignal(request.resource.data);
+      allow delete: if isValidId(signalId) && isAdmin();
+    }
+
+    // 5. Audit Logs Collection (/audit_logs/{logId})
+    match /audit_logs/{logId} {
+      allow get: if isValidId(logId) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidId(logId) && isSignedIn() && isValidAuditLog(request.resource.data);
+      // Audit logs are append-only & immutable
+      allow update, delete: if false;
+    }
+  }
+}

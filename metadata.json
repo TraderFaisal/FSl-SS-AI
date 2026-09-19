@@ -1,0 +1,6 @@
+{
+  "name": "FSL TRADER — AI Market Vision Pro",
+  "description": "Cyberpunk AI-powered market vision and multi-timeframe confluence trading platform for candlestick pattern, indicator, and technical structure analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
